@@ -6,6 +6,35 @@ from PySide6.QtCore import Qt, QStandardPaths, Signal, QObject
 from PySide6.QtGui import QIcon, QPixmap
 import yt_dlp
 import os
+import urllib.request
+import zipfile
+
+def baixar_ffmpeg(destino="ffmpeg"):
+    ffmpeg_exe = os.path.join(destino, "bin", "ffmpeg.exe")
+    if os.path.exists(ffmpeg_exe):
+        return
+
+    print("Baixando FFmpeg...")
+    os.makedirs(destino, exist_ok=True)
+    zip_path = os.path.join(destino, "ffmpeg.zip")
+
+    url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+    urllib.request.urlretrieve(url, zip_path)
+
+    with zipfile.ZipFile(zip_path, "r") as zip_ref:
+        zip_ref.extractall(destino)
+
+    os.remove(zip_path)
+
+    for root, dirs, files in os.walk(destino):
+        for d in dirs:
+            if "bin" in d:
+                src = os.path.join(root, d)
+                dest_bin = os.path.join(destino, "bin")
+                if not os.path.exists(dest_bin):
+                    os.rename(src, dest_bin)
+                break
+        break
 
 def configurar_ffmpeg():
     if getattr(sys, 'frozen', False):
@@ -240,6 +269,7 @@ class YouTubeDownloader(QMainWindow):
 
 
 def main():
+    baixar_ffmpeg()
     configurar_ffmpeg()
     app = QApplication(sys.argv)
     window = YouTubeDownloader()
