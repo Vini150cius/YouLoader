@@ -14,7 +14,7 @@ def baixar_ffmpeg(destino="ffmpeg"):
     if os.path.exists(ffmpeg_exe):
         return
 
-    print("Baixando FFmpeg...")
+    QMessageBox.information(None, "Baixando FFmpeg...", "Estamos instalando o FFmpeg, aguarde...")
     os.makedirs(destino, exist_ok=True)
     zip_path = os.path.join(destino, "ffmpeg.zip")
 
@@ -38,7 +38,7 @@ def baixar_ffmpeg(destino="ffmpeg"):
 
 def configurar_ffmpeg():
     if getattr(sys, 'frozen', False):
-        base_path = sys._MEIPASS
+        base_path = os.path.dirname(sys.executable)
     else:
         base_path = os.path.abspath(".")
 
