@@ -8,14 +8,18 @@
 
 ## ➕Explicação detalhada do projeto.
 
-YouLoader é uma aplicação desktop que permite baixar facilmente vídeos do YouTube em diferentes formatos e qualidades. O aplicativo foi desenvolvido com Python e utiliza a biblioteca yt-dlp para gerenciar os downloads, oferecendo uma interface gráfica amigável construída com PySide6 (Qt).
-Ele foi desenvolvido quando não encontrei nenhum site ou aplicativo de confiaça que fazia o download de videos do YouTube, então resolvi desenvolver o meu proprio.
-Toda a aplicação foi desenvolvida com ajuda do Claude.ai, já que era para ser um projeto rapido e não tinha projundo conhecimento em Python e principalmente em PySide.
+YouLoader é um aplicativo desktop que permite baixar facilmente vídeos do YouTube em diferentes formatos e qualidades. O programa foi desenvolvido em Python e utiliza a biblioteca yt-dlp para gerenciar os downloads, oferecendo uma interface gráfica amigável construída com PySide6 (Qt).
+
+Ele foi criado quando percebi a falta de sites ou aplicativos confiáveis para baixar vídeos do YouTube. Por isso, decidi desenvolver minha própria solução.
+
+Todo o desenvolvimento foi feito com o auxílio do Claude.ai, já que a ideia era criar um projeto rápido e eu não tinha um conhecimento aprofundado em Python, especialmente com PySide.
 
 ## 🚀 Instalação
 
 O aplicativo gerencia automaticamente suas dependências, incluindo o download do FFmpeg caso não esteja instalado no sistema.
-Para instalar, basta clonar o projeto ou baixar o .zip e ir na pasta `dist` e executar o arquivo `.exe`.
+Para instalar, basta clonar o repositório ou baixar o .zip, acessar a pasta `dist` e executar o arquivo `.exe`.
+
+> ⚠️ **Atenção**: Na primeira execução, o aplicativo pode demorar um pouco mais, pois realizará o download e a configuração do FFmpeg automaticamente.
 
 ## ✨ Funcionalidades
 
@@ -34,7 +38,6 @@ Para instalar, basta clonar o projeto ou baixar o .zip e ir na pasta `dist` e ex
 - **FFmpeg**: Ferramenta para processamento de vídeo e áudio
 - **Logging**: Sistema de registro de logs para rastreamento de erros
 
-
 ## 📝 Notas
 
 Este aplicativo foi desenvolvido para fins educacionais. O download de conteúdo do YouTube deve respeitar os termos de serviço da plataforma e os direitos autorais dos criadores de conteúdo.
@@ -45,4 +48,4 @@ O uso deste software para baixar conteúdo protegido por direitos autorais sem p
 
 ## 📝 Licença.
 
-O projeto pode ser usado para estudo ou até mesmo reciclado para algum outro projeto, mas caso for utilizar, peço encarecidamente para dar o merecido crédito.
+Este projeto pode ser usado para fins de estudo ou como base para outros projetos. Caso deseje utilizá-lo, peço encarecidamente que dê os devidos créditos.
