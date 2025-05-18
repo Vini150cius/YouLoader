@@ -70,19 +70,29 @@ def resource_path(relative_path):
 def verificar_ffmpeg():
     try:
         import subprocess
+        import shutil
+
+        # Primeiro tenta encontrar o FFmpeg no PATH do sistema
+        ffmpeg_path = shutil.which('ffmpeg')
+        if ffmpeg_path:
+            logging.info(f"FFmpeg encontrado no sistema em: {ffmpeg_path}")
+            return True
+
+        # Se não encontrou no PATH, tenta executar diretamente
         result = subprocess.run(["ffmpeg", "-version"],
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE,
-                                text=True,
-                                shell=True)
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,
+                              text=True,
+                              shell=True)
+        
         if result.returncode == 0:
             logging.info("FFmpeg encontrado no sistema")
             return True
         else:
             logging.warning("FFmpeg não encontrado no sistema, verificando pasta local")
             return False
-    except Exception:
-        logging.warning("Erro ao verificar FFmpeg no sistema, verificando pasta local")
+    except Exception as e:
+        logging.warning(f"Erro ao verificar FFmpeg no sistema: {e}")
         return False
 
 
@@ -106,16 +116,18 @@ def baixar_ffmpeg(destino="ffmpeg"):
     try:
         logging.info("Verificando se o FFmpeg já está disponível")
 
+        # Primeiro verifica se o FFmpeg já está instalado no sistema
         if verificar_ffmpeg():
             logging.info("FFmpeg já disponível no sistema, não será baixado")
-            return
+            return True
 
+        # Depois verifica se já existe localmente
         if verificar_ffmpeg_local(destino):
-            logging.info("FFmpeg já existe localmente, não será baixado")
-            return
+            logging.info("FFmpeg já existe localmente, configurando PATH")
+            configurar_ffmpeg()
+            return True
 
-        logging.info(f"Iniciando download do FFmpeg para: {destino}")
-
+        # Se não encontrou, prepara para download
         if getattr(sys, 'frozen', False):
             base_path = os.path.dirname(sys.executable)
         else:
@@ -125,41 +137,63 @@ def baixar_ffmpeg(destino="ffmpeg"):
         os.makedirs(destino_completo, exist_ok=True)
         zip_path = os.path.join(destino_completo, "ffmpeg.zip")
 
-        logging.info("Baixando FFmpeg...")
-        QMessageBox.information(None, "Baixando FFmpeg...",
-                                "Estamos instalando o FFmpeg, aguarde... (isso será feito apenas uma vez)")
+        # Informa ao usuário sobre o download
+        QMessageBox.information(None, "Download do FFmpeg",
+                              "O FFmpeg não foi encontrado no sistema. Iniciando o download...\n" 
+                              "Este processo será realizado apenas uma vez.")
 
-        url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-        urllib.request.urlretrieve(url, zip_path)
-        logging.info("Download do FFmpeg concluído")
+        try:
+            logging.info("Baixando FFmpeg...")
+            url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+            urllib.request.urlretrieve(url, zip_path)
+            logging.info("Download do FFmpeg concluído")
 
-        logging.info("Extraindo arquivos FFmpeg...")
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(destino_completo)
-        logging.info("Extração concluída")
+            logging.info("Extraindo arquivos FFmpeg...")
+            with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                zip_ref.extractall(destino_completo)
+            logging.info("Extração concluída")
 
-        os.remove(zip_path)
-        logging.info("Arquivo zip removido")
+            # Remove o arquivo zip após extração
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+                logging.info("Arquivo zip removido")
 
-        for root, dirs, files in os.walk(destino_completo):
-            for d in dirs:
-                if "bin" in d:
-                    src = os.path.join(root, d)
-                    dest_bin = os.path.join(destino_completo, "bin")
-                    if not os.path.exists(dest_bin):
-                        logging.info(f"Movendo pasta bin de {src} para {dest_bin}")
-                        os.rename(src, dest_bin)
+            # Procura e move a pasta bin para o local correto
+            bin_encontrado = False
+            for root, dirs, _ in os.walk(destino_completo):
+                for d in dirs:
+                    if "bin" in d:
+                        src = os.path.join(root, d)
+                        dest_bin = os.path.join(destino_completo, "bin")
+                        if src != dest_bin and not os.path.exists(dest_bin):
+                            logging.info(f"Movendo pasta bin de {src} para {dest_bin}")
+                            os.rename(src, dest_bin)
+                            bin_encontrado = True
+                            break
+                if bin_encontrado:
                     break
-            break
 
-        logging.info("FFmpeg configurado com sucesso")
-        return True
+            # Verifica se a instalação foi bem-sucedida
+            if verificar_ffmpeg_local(destino):
+                logging.info("FFmpeg instalado com sucesso")
+                configurar_ffmpeg()
+                return True
+            else:
+                raise Exception("Falha ao verificar instalação do FFmpeg")
+
+        except Exception as download_error:
+            logging.error(f"Erro durante download/extração do FFmpeg: {download_error}")
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+            raise download_error
+
     except Exception as e:
         logging.error(f"Erro ao baixar/configurar FFmpeg: {e}")
         logging.exception("Detalhes do erro:")
         QMessageBox.warning(None, "Erro FFmpeg",
-                            f"Erro ao configurar FFmpeg: {e}\n"
-                            f"O aplicativo tentará continuar, mas downloads de áudio podem falhar.")
+                          "Ocorreu um erro ao instalar o FFmpeg.\n" 
+                          "O aplicativo tentará continuar, mas os downloads de áudio podem falhar.\n\n" 
+                          f"Erro: {str(e)}")
         return False
 
 
