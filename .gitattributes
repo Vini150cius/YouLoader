@@ -1,1 +1,15 @@
+* linguist-detectable=true
 * linguist-language=Python
+
+*.html linguist-vendored
+*.htm linguist-vendored
+*.tex linguist-vendored
+
+*.ico linguist-vendored
+*.png linguist-vendored
+*.jpg linguist-vendored
+*.jpeg linguist-vendored
+*.gif linguist-vendored
+*.svg linguist-vendored
+*.bat linguist-vendored
+*.spec linguist-vendored
