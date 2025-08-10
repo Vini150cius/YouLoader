@@ -1,15 +1,14 @@
-* linguist-detectable=true
-* linguist-language=Python
-
-*.html linguist-vendored
-*.htm linguist-vendored
-*.tex linguist-vendored
-
+build/* linguist-vendored
+dist/* linguist-vendored
+.idea/* linguist-vendored
+*.spec linguist-vendored
+*.bat linguist-vendored
 *.ico linguist-vendored
 *.png linguist-vendored
 *.jpg linguist-vendored
 *.jpeg linguist-vendored
 *.gif linguist-vendored
 *.svg linguist-vendored
-*.bat linguist-vendored
-*.spec linguist-vendored
+*.md linguist-vendored
+*.txt linguist-vendored
+*.tex linguist-vendored
