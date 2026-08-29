@@ -1,9 +1,11 @@
 import sys
 import os
+import re
 import traceback
 import urllib.request
 import zipfile
 import logging
+import subprocess
 from threading import Thread
 from datetime import datetime
 
@@ -37,9 +39,10 @@ sys.excepthook = log_uncaught_exceptions
 try:
     from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                    QHBoxLayout, QLabel, QLineEdit, QComboBox,
-                                   QPushButton, QFileDialog, QMessageBox, QProgressBar)
-    from PySide6.QtCore import Qt, QStandardPaths, Signal, QObject
-    from PySide6.QtGui import QIcon, QPixmap
+                                   QPushButton, QFileDialog, QMessageBox, QProgressBar,
+                                   QFrame)
+    from PySide6.QtCore import Qt, QStandardPaths, Signal, QObject, QUrl
+    from PySide6.QtGui import QIcon, QPixmap, QDesktopServices
     import yt_dlp
 except ImportError as e:
     logging.critical(f"Erro ao importar módulos: {e}")
@@ -51,9 +54,16 @@ except ImportError as e:
         root.withdraw()
         messagebox.showerror("Erro de Importação",
                              f"Falha ao importar módulos necessários: {e}\nVerifique o log em: {log_file}")
-    except:
+    except Exception:
         pass
     sys.exit(1)
+
+
+# Regex simples para validar links do YouTube (vídeo, shorts ou youtu.be)
+YOUTUBE_URL_RE = re.compile(
+    r'^(https?://)?(www\.)?(youtube\.com/(watch\?v=|shorts/)|youtu\.be/)[\w\-]+',
+    re.IGNORECASE
+)
 
 
 def resource_path(relative_path):
@@ -69,7 +79,6 @@ def resource_path(relative_path):
 
 def verificar_ffmpeg():
     try:
-        import subprocess
         import shutil
 
         # Primeiro tenta encontrar o FFmpeg no PATH do sistema
@@ -78,13 +87,13 @@ def verificar_ffmpeg():
             logging.info(f"FFmpeg encontrado no sistema em: {ffmpeg_path}")
             return True
 
-        # Se não encontrou no PATH, tenta executar diretamente
+        # Se não encontrou no PATH, tenta executar diretamente (sem shell=True,
+        # que é desnecessário aqui e mascara o erro real caso o binário não exista)
         result = subprocess.run(["ffmpeg", "-version"],
                               stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE,
-                              text=True,
-                              shell=True)
-        
+                              text=True)
+
         if result.returncode == 0:
             logging.info("FFmpeg encontrado no sistema")
             return True
@@ -116,18 +125,15 @@ def baixar_ffmpeg(destino="ffmpeg"):
     try:
         logging.info("Verificando se o FFmpeg já está disponível")
 
-        # Primeiro verifica se o FFmpeg já está instalado no sistema
         if verificar_ffmpeg():
             logging.info("FFmpeg já disponível no sistema, não será baixado")
             return True
 
-        # Depois verifica se já existe localmente
         if verificar_ffmpeg_local(destino):
             logging.info("FFmpeg já existe localmente, configurando PATH")
             configurar_ffmpeg()
             return True
 
-        # Se não encontrou, prepara para download
         if getattr(sys, 'frozen', False):
             base_path = os.path.dirname(sys.executable)
         else:
@@ -137,9 +143,8 @@ def baixar_ffmpeg(destino="ffmpeg"):
         os.makedirs(destino_completo, exist_ok=True)
         zip_path = os.path.join(destino_completo, "ffmpeg.zip")
 
-        # Informa ao usuário sobre o download
         QMessageBox.information(None, "Download do FFmpeg",
-                              "O FFmpeg não foi encontrado no sistema. Iniciando o download...\n" 
+                              "O FFmpeg não foi encontrado no sistema. Iniciando o download...\n"
                               "Este processo será realizado apenas uma vez.")
 
         try:
@@ -153,12 +158,10 @@ def baixar_ffmpeg(destino="ffmpeg"):
                 zip_ref.extractall(destino_completo)
             logging.info("Extração concluída")
 
-            # Remove o arquivo zip após extração
             if os.path.exists(zip_path):
                 os.remove(zip_path)
                 logging.info("Arquivo zip removido")
 
-            # Procura e move a pasta bin para o local correto
             bin_encontrado = False
             for root, dirs, _ in os.walk(destino_completo):
                 for d in dirs:
@@ -173,7 +176,6 @@ def baixar_ffmpeg(destino="ffmpeg"):
                 if bin_encontrado:
                     break
 
-            # Verifica se a instalação foi bem-sucedida
             if verificar_ffmpeg_local(destino):
                 logging.info("FFmpeg instalado com sucesso")
                 configurar_ffmpeg()
@@ -191,8 +193,8 @@ def baixar_ffmpeg(destino="ffmpeg"):
         logging.error(f"Erro ao baixar/configurar FFmpeg: {e}")
         logging.exception("Detalhes do erro:")
         QMessageBox.warning(None, "Erro FFmpeg",
-                          "Ocorreu um erro ao instalar o FFmpeg.\n" 
-                          "O aplicativo tentará continuar, mas os downloads de áudio podem falhar.\n\n" 
+                          "Ocorreu um erro ao instalar o FFmpeg.\n"
+                          "O aplicativo tentará continuar, mas os downloads de áudio podem falhar.\n\n"
                           f"Erro: {str(e)}")
         return False
 
@@ -213,7 +215,8 @@ def configurar_ffmpeg():
         if not os.path.exists(ffmpeg_path):
             logging.warning(f"Pasta FFmpeg não encontrada em: {ffmpeg_path}")
 
-        os.environ["PATH"] += os.pathsep + ffmpeg_path
+        if ffmpeg_path not in os.environ["PATH"]:
+            os.environ["PATH"] += os.pathsep + ffmpeg_path
 
         logging.debug(f"PATH atual: {os.environ['PATH']}")
     except Exception as e:
@@ -221,38 +224,147 @@ def configurar_ffmpeg():
         logging.exception("Detalhes do erro:")
 
 
+class DownloadCancelled(Exception):
+    """Exceção interna usada para interromper um download em andamento."""
+    pass
+
+
 class DownloadProgress(QObject):
     progress_update = Signal(float, str)
-    download_complete = Signal()
+    status_update = Signal(str)
+    download_complete = Signal(str, str)   # título, pasta de destino
     download_error = Signal(str)
 
     def __init__(self):
         super().__init__()
+        self.cancel_requested = False
 
     def progress_hook(self, d):
         try:
+            if self.cancel_requested:
+                # Interrompe o download de forma controlada em vez de deixar
+                # o processo continuar "preso" em segundo plano.
+                raise DownloadCancelled("Download cancelado pelo usuário")
+
             if d['status'] == 'downloading':
                 p = d.get('_percent_str', '0%')
+                p = re.sub(r'\x1b\[[0-9;]*m', '', p)  # remove códigos ANSI de cor
                 p = p.replace('%', '').strip()
                 try:
                     percent = float(p)
                 except ValueError:
                     percent = 0
 
-                speed = d.get('_speed_str', '')
-                eta = d.get('_eta_str', '')
-                info = f"Velocidade: {speed} | Tempo restante: {eta}"
+                speed = d.get('_speed_str', '').strip() or "—"
+                eta = d.get('_eta_str', '').strip() or "—"
+                info = f"Velocidade: {speed}   |   Tempo restante: {eta}"
 
                 self.progress_update.emit(percent, info)
 
             elif d['status'] == 'finished':
-                self.download_complete.emit()
+                # NÃO significa que o processo terminou: para vídeos MP4 ainda falta
+                # mesclar vídeo+áudio, e para MP3 ainda falta extrair o áudio.
+                # Emitir "concluído" aqui era a causa do bug de downloads que pareciam
+                # falhar/ficar incompletos, pois a UI liberava o botão antes da hora.
+                self.status_update.emit("Processando arquivo (mesclando/convertendo)...")
 
             elif d['status'] == 'error':
                 self.download_error.emit(str(d.get('error', 'Erro desconhecido')))
+        except DownloadCancelled:
+            raise
         except Exception as e:
             logging.error(f"Erro no hook de progresso: {e}")
             self.download_error.emit(f"Erro no progresso: {e}")
+
+
+STYLESHEET = """
+QMainWindow, QWidget {
+    background-color: #1e1f26;
+    color: #e8e8ec;
+    font-family: 'Segoe UI', sans-serif;
+}
+QLabel {
+    color: #c7c7d1;
+    font-size: 13px;
+}
+QLabel#title {
+    color: #ffffff;
+    font-size: 18px;
+    font-weight: 600;
+}
+QLabel#status {
+    color: #9a9aa5;
+    font-size: 12px;
+}
+QLineEdit, QComboBox {
+    background-color: #2a2b34;
+    border: 1px solid #3a3b46;
+    border-radius: 6px;
+    padding: 7px 9px;
+    color: #f0f0f3;
+    font-size: 13px;
+}
+QLineEdit:focus, QComboBox:focus {
+    border: 1px solid #FF3B30;
+}
+QComboBox::drop-down {
+    border: none;
+    width: 22px;
+}
+QPushButton {
+    background-color: #2f303b;
+    border: 1px solid #3a3b46;
+    border-radius: 6px;
+    padding: 8px 14px;
+    color: #e8e8ec;
+    font-size: 13px;
+}
+QPushButton:hover {
+    background-color: #383946;
+}
+QPushButton:disabled {
+    color: #6b6c76;
+}
+QPushButton#downloadBtn {
+    background-color: #FF3B30;
+    border: none;
+    color: white;
+    font-weight: 600;
+    padding: 10px 16px;
+    font-size: 14px;
+}
+QPushButton#downloadBtn:hover {
+    background-color: #e6352b;
+}
+QPushButton#downloadBtn:disabled {
+    background-color: #7a3733;
+    color: #d9d9d9;
+}
+QPushButton#cancelBtn {
+    background-color: transparent;
+    border: 1px solid #FF3B30;
+    color: #FF3B30;
+}
+QPushButton#cancelBtn:hover {
+    background-color: rgba(255, 59, 48, 0.12);
+}
+QProgressBar {
+    border: 1px solid #3a3b46;
+    border-radius: 6px;
+    text-align: center;
+    height: 22px;
+    background-color: #2a2b34;
+    color: #f0f0f3;
+}
+QProgressBar::chunk {
+    background-color: #FF3B30;
+    border-radius: 5px;
+}
+QFrame#divider {
+    background-color: #3a3b46;
+    max-height: 1px;
+}
+"""
 
 
 class YouLoader(QMainWindow):
@@ -261,7 +373,8 @@ class YouLoader(QMainWindow):
         try:
             logging.info("Iniciando a interface do YouTube Downloader")
             self.setWindowTitle("YouLoader")
-            self.setFixedSize(500, 400)
+            self.setMinimumSize(480, 460)
+            self.resize(480, 460)
 
             self.default_download_folder = QStandardPaths.writableLocation(QStandardPaths.DownloadLocation)
             logging.info(f"Pasta de downloads padrão: {self.default_download_folder}")
@@ -271,9 +384,14 @@ class YouLoader(QMainWindow):
 
             self.progress_manager = DownloadProgress()
             self.progress_manager.progress_update.connect(self.update_progress)
+            self.progress_manager.status_update.connect(self.update_status_text)
             self.progress_manager.download_complete.connect(self.download_finished)
             self.progress_manager.download_error.connect(self.download_error)
 
+            self.last_dest_folder = self.default_download_folder
+            self.is_downloading = False
+
+            self.setStyleSheet(STYLESHEET)
             self.init_ui()
             logging.info("Interface inicializada com sucesso")
         except Exception as e:
@@ -315,41 +433,70 @@ class YouLoader(QMainWindow):
             central_widget = QWidget()
             self.setCentralWidget(central_widget)
             main_layout = QVBoxLayout(central_widget)
-            main_layout.setSpacing(10)
+            main_layout.setContentsMargins(24, 20, 24, 20)
+            main_layout.setSpacing(12)
 
-            logo_layout = QHBoxLayout()
-
+            # Cabeçalho com logo + título
+            header_layout = QHBoxLayout()
             logo_label = QLabel()
             logo_label.setPixmap(self.logo_pixmap)
-            logo_label.setAlignment(Qt.AlignCenter)
-
-            logo_layout.addStretch()
-            logo_layout.addWidget(logo_label)
-            logo_layout.addStretch()
-            logo_label.setFixedSize(64, 60)
+            logo_label.setFixedSize(40, 38)
             logo_label.setScaledContents(True)
 
-            main_layout.addLayout(logo_layout)
-            main_layout.addSpacing(10)
+            title_label = QLabel("YouLoader")
+            title_label.setObjectName("title")
 
-            url_label = QLabel("Link do vídeo do YouTube:")
-            self.url_input = QLineEdit()
+            header_layout.addWidget(logo_label)
+            header_layout.addSpacing(8)
+            header_layout.addWidget(title_label)
+            header_layout.addStretch()
+            main_layout.addLayout(header_layout)
+
+            divider = QFrame()
+            divider.setObjectName("divider")
+            divider.setFrameShape(QFrame.HLine)
+            main_layout.addWidget(divider)
+            main_layout.addSpacing(4)
+
+            # Campo de URL com botão de colar
+            url_label = QLabel("Link do vídeo do YouTube")
             main_layout.addWidget(url_label)
-            main_layout.addWidget(self.url_input)
 
-            quality_label = QLabel("Qualidade do vídeo:")
+            url_row = QHBoxLayout()
+            self.url_input = QLineEdit()
+            self.url_input.setPlaceholderText("https://www.youtube.com/watch?v=...")
+            self.url_input.textChanged.connect(self.clear_url_warning)
+            self.paste_btn = QPushButton("Colar")
+            self.paste_btn.setFixedWidth(70)
+            self.paste_btn.clicked.connect(self.paste_from_clipboard)
+            url_row.addWidget(self.url_input)
+            url_row.addWidget(self.paste_btn)
+            main_layout.addLayout(url_row)
+
+            # Qualidade e formato lado a lado
+            options_row = QHBoxLayout()
+
+            quality_col = QVBoxLayout()
+            quality_label = QLabel("Qualidade")
             self.quality_combo = QComboBox()
             self.quality_combo.addItems(["Alta", "Média", "Baixa"])
-            main_layout.addWidget(quality_label)
-            main_layout.addWidget(self.quality_combo)
+            quality_col.addWidget(quality_label)
+            quality_col.addWidget(self.quality_combo)
 
-            format_label = QLabel("Formato:")
+            format_col = QVBoxLayout()
+            format_label = QLabel("Formato")
             self.format_combo = QComboBox()
             self.format_combo.addItems(["mp4", "mp3"])
-            main_layout.addWidget(format_label)
-            main_layout.addWidget(self.format_combo)
+            self.format_combo.currentTextChanged.connect(self.on_format_changed)
+            format_col.addWidget(format_label)
+            format_col.addWidget(self.format_combo)
 
-            folder_label = QLabel("Pasta de destino:")
+            options_row.addLayout(quality_col)
+            options_row.addLayout(format_col)
+            main_layout.addLayout(options_row)
+
+            # Pasta de destino
+            folder_label = QLabel("Pasta de destino")
             main_layout.addWidget(folder_label)
 
             folder_layout = QHBoxLayout()
@@ -361,39 +508,48 @@ class YouLoader(QMainWindow):
             folder_layout.addWidget(self.folder_btn)
             main_layout.addLayout(folder_layout)
 
-            self.download_btn = QPushButton("Baixar")
-            self.download_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 8px;")
-            self.download_btn.clicked.connect(self.download)
-            main_layout.addWidget(self.download_btn, alignment=Qt.AlignCenter)
+            main_layout.addSpacing(6)
 
+            # Botões de ação
+            action_row = QHBoxLayout()
+            self.download_btn = QPushButton("Baixar")
+            self.download_btn.setObjectName("downloadBtn")
+            self.download_btn.clicked.connect(self.download)
+
+            self.cancel_btn = QPushButton("Cancelar")
+            self.cancel_btn.setObjectName("cancelBtn")
+            self.cancel_btn.clicked.connect(self.cancel_download)
+            self.cancel_btn.setVisible(False)
+
+            action_row.addWidget(self.download_btn)
+            action_row.addWidget(self.cancel_btn)
+            main_layout.addLayout(action_row)
+
+            # Progresso
             progress_layout = QVBoxLayout()
+            progress_layout.setSpacing(6)
 
             self.progress_bar = QProgressBar()
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(0)
             self.progress_bar.setTextVisible(True)
             self.progress_bar.setFormat("%p%")
-            self.progress_bar.setStyleSheet("""
-                QProgressBar {
-                    border: 1px solid #CCCCCC;
-                    border-radius: 5px;
-                    text-align: center;
-                    height: 25px;
-                }
-                QProgressBar::chunk {
-                    background-color: #FF0000;
-                    width: 10px;
-                    margin: 0.5px;
-                }
-            """)
 
-            self.status_label = QLabel("Pronto para download")
+            self.status_label = QLabel("Pronto para baixar")
+            self.status_label.setObjectName("status")
             self.status_label.setAlignment(Qt.AlignCenter)
+            self.status_label.setWordWrap(True)
 
             progress_layout.addWidget(self.progress_bar)
             progress_layout.addWidget(self.status_label)
 
             main_layout.addLayout(progress_layout)
+
+            # Botão "Abrir pasta", só aparece após concluir
+            self.open_folder_btn = QPushButton("Abrir pasta de destino")
+            self.open_folder_btn.clicked.connect(self.open_destination_folder)
+            self.open_folder_btn.setVisible(False)
+            main_layout.addWidget(self.open_folder_btn)
 
             main_layout.addStretch()
 
@@ -402,6 +558,19 @@ class YouLoader(QMainWindow):
             logging.error(f"Erro ao inicializar UI: {e}")
             logging.exception("Detalhes do erro:")
             raise
+
+    def on_format_changed(self, fmt):
+        # A qualidade só faz sentido para vídeo; em áudio, sempre extraímos o melhor.
+        self.quality_combo.setEnabled(fmt == "mp4")
+
+    def clear_url_warning(self):
+        self.url_input.setStyleSheet("")
+
+    def paste_from_clipboard(self):
+        clipboard = QApplication.clipboard()
+        text = clipboard.text().strip()
+        if text:
+            self.url_input.setText(text)
 
     def choose_folder(self):
         try:
@@ -412,6 +581,15 @@ class YouLoader(QMainWindow):
         except Exception as e:
             logging.error(f"Erro ao selecionar pasta: {e}")
             QMessageBox.warning(self, "Erro", f"Erro ao selecionar pasta: {e}")
+
+    def open_destination_folder(self):
+        if self.last_dest_folder and os.path.isdir(self.last_dest_folder):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self.last_dest_folder))
+
+    def cancel_download(self):
+        if self.is_downloading:
+            self.progress_manager.cancel_requested = True
+            self.status_label.setText("Cancelando...")
 
     def download(self):
         try:
@@ -426,46 +604,75 @@ class YouLoader(QMainWindow):
                 QMessageBox.warning(self, "Aviso", "Insira o link do vídeo.")
                 return
 
+            if not YOUTUBE_URL_RE.match(url):
+                self.url_input.setStyleSheet("border: 1px solid #FF3B30;")
+                QMessageBox.warning(self, "Link inválido",
+                                     "Esse não parece ser um link válido do YouTube.\n"
+                                     "Use um link no formato:\n"
+                                     "https://www.youtube.com/watch?v=XXXXXXXX\n"
+                                     "https://youtu.be/XXXXXXXX")
+                return
+
             if not folder:
                 folder = self.default_download_folder
                 logging.info(f"Pasta não especificada, usando padrão: {folder}")
 
+            if not os.path.isdir(folder):
+                try:
+                    os.makedirs(folder, exist_ok=True)
+                except Exception:
+                    QMessageBox.warning(self, "Aviso", "A pasta de destino informada é inválida.")
+                    return
+
+            self.last_dest_folder = folder
+            self.progress_manager.cancel_requested = False
+
+            common_opts = {
+                'outtmpl': os.path.join(folder, '%(title).150s.%(ext)s'),
+                'noplaylist': True,
+                'windowsfilenames': True,
+                'restrictfilenames': False,
+                'retries': 10,
+                'fragment_retries': 10,
+                'socket_timeout': 30,
+                'concurrent_fragment_downloads': 4,
+                'progress_hooks': [self.progress_manager.progress_hook],
+                'quiet': True,
+                'no_warnings': False,
+            }
+
             if format_type == "mp4":
                 if quality == "Alta":
-                    format_yt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/mp4"
+                    format_yt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
                 elif quality == "Média":
-                    format_yt = "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/mp4"
+                    format_yt = "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]"
                 else:
-                    format_yt = "worstvideo[ext=mp4]+worstaudio[ext=m4a]/worst[ext=mp4]/mp4"
-
-                ext = "mp4"
+                    format_yt = "worstvideo[ext=mp4]+worstaudio[ext=m4a]/worst[ext=mp4]/worst"
 
                 ydl_opts = {
-                    'outtmpl': os.path.join(folder, '%(title)s.%(ext)s'),
+                    **common_opts,
                     'format': format_yt,
-                    'progress_hooks': [self.progress_manager.progress_hook],
                     'merge_output_format': 'mp4',
-                    'postprocessor_args': [
-                        '-c:v', 'libx264',
-                        '-c:a', 'aac',
-                    ],
-                    'verbose': True,
+                    # Antes o app forçava reencode (-c:v libx264 -c:a aac) em TODO
+                    # download, o que era lento e podia falhar/travar em vídeos longos
+                    # ou em máquinas mais fracas. Como os formatos já são filtrados
+                    # para mp4/m4a (H.264/AAC), basta remuxar sem recodificar.
+                    'postprocessor_args': {
+                        'merger': ['-c', 'copy'],
+                    },
                 }
 
             else:  # mp3
                 format_yt = "bestaudio/best"
-                ext = "mp3"
 
                 ydl_opts = {
-                    'outtmpl': os.path.join(folder, '%(title)s.%(ext)s'),
+                    **common_opts,
                     'format': format_yt,
-                    'progress_hooks': [self.progress_manager.progress_hook],
                     'postprocessors': [{
                         'key': 'FFmpegExtractAudio',
                         'preferredcodec': 'mp3',
                         'preferredquality': '192',
                     }],
-                    'verbose': True,
                 }
 
             logging.info(f"Formato yt-dlp: {format_yt}")
@@ -473,18 +680,30 @@ class YouLoader(QMainWindow):
 
             self.progress_bar.setValue(0)
             self.status_label.setText("Iniciando download...")
+            self.open_folder_btn.setVisible(False)
             self.download_btn.setEnabled(False)
             self.download_btn.setText("Baixando...")
+            self.cancel_btn.setVisible(True)
+            self.is_downloading = True
 
             def download_thread():
                 try:
                     logging.info(f"Thread de download iniciada para URL: {url}")
+                    # Uma única chamada faz a extração de metadados E o download,
+                    # em vez das duas chamadas separadas (extract_info + download)
+                    # que existiam antes. Duas requisições distintas ao YouTube
+                    # aumentavam a chance de a segunda ser bloqueada/expirar,
+                    # o que também contribuía para o "às vezes não baixa".
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(url, download=False)
-                        logging.info(
-                            f"Informações do vídeo: Título={info.get('title')}, Formatos disponíveis={info.get('formats')}")
-                        ydl.download([url])
+                        info = ydl.extract_info(url, download=True)
+                        title = info.get('title', 'vídeo') if info else 'vídeo'
                     logging.info("Download concluído com sucesso")
+                    # Só sinaliza "concluído" depois que download() retorna de fato,
+                    # ou seja, depois que toda a mesclagem/conversão terminou.
+                    self.progress_manager.download_complete.emit(title, folder)
+                except DownloadCancelled:
+                    logging.info("Download cancelado pelo usuário")
+                    self.progress_manager.download_error.emit("__CANCELLED__")
                 except Exception as e:
                     logging.error(f"Erro no download: {e}")
                     logging.exception("Detalhes do erro:")
@@ -496,9 +715,14 @@ class YouLoader(QMainWindow):
             logging.error(f"Erro ao iniciar download: {e}")
             logging.exception("Detalhes do erro:")
             self.status_label.setText("Erro ao iniciar download")
-            self.download_btn.setEnabled(True)
-            self.download_btn.setText("Baixar")
+            self.reset_download_controls()
             QMessageBox.critical(self, "Erro", f"Erro ao iniciar download: {e}")
+
+    def reset_download_controls(self):
+        self.download_btn.setEnabled(True)
+        self.download_btn.setText("Baixar")
+        self.cancel_btn.setVisible(False)
+        self.is_downloading = False
 
     def update_progress(self, percent, info):
         try:
@@ -508,17 +732,19 @@ class YouLoader(QMainWindow):
         except Exception as e:
             logging.error(f"Erro ao atualizar progresso: {e}")
 
-    def download_finished(self):
+    def update_status_text(self, text):
+        self.status_label.setText(text)
+
+    def download_finished(self, title, dest_folder):
         try:
             self.progress_bar.setValue(100)
             self.status_label.setText("Download concluído com sucesso!")
-            self.download_btn.setEnabled(True)
-            self.download_btn.setText("Baixar")
+            self.reset_download_controls()
+            self.open_folder_btn.setVisible(True)
 
-            dest_folder = self.folder_input.text() or self.default_download_folder
             logging.info(f"Download concluído em: {dest_folder}")
 
-            QMessageBox.information(self, "Sucesso", f"Download concluído em:\n{dest_folder}")
+            QMessageBox.information(self, "Sucesso", f'"{title}" baixado com sucesso em:\n{dest_folder}')
         except Exception as e:
             logging.error(f"Erro ao finalizar download: {e}")
             QMessageBox.critical(self, "Erro", f"Erro ao finalizar download: {e}")
@@ -526,10 +752,13 @@ class YouLoader(QMainWindow):
     def download_error(self, error_msg):
         try:
             self.progress_bar.setValue(0)
-            self.status_label.setText("Erro no download")
-            self.download_btn.setEnabled(True)
-            self.download_btn.setText("Baixar")
+            self.reset_download_controls()
 
+            if error_msg == "__CANCELLED__":
+                self.status_label.setText("Download cancelado")
+                return
+
+            self.status_label.setText("Erro no download")
             logging.error(f"Erro reportado no download: {error_msg}")
             QMessageBox.critical(self, "Erro", f"Erro ao baixar vídeo:\n{error_msg}")
         except Exception as e:
@@ -559,7 +788,7 @@ def main():
         window.show()
         logging.info("Janela exibida, iniciando loop de eventos")
 
-        sys.exit(app.exec_())
+        sys.exit(app.exec())
     except Exception as e:
         logging.critical(f"ERRO FATAL NA FUNÇÃO MAIN: {e}")
         logging.exception("Detalhes do erro:")
@@ -568,7 +797,7 @@ def main():
             QMessageBox.critical(None, "Erro Fatal",
                                  f"Um erro fatal ocorreu ao iniciar o aplicativo.\n"
                                  f"Detalhes do erro foram salvos em:\n{log_file}")
-        except:
+        except Exception:
             pass
         sys.exit(1)
 
